@@ -16,6 +16,18 @@
 # call hits finish_reason=length with message.content=None, confirmed
 # live by replaying the exact prompt ai4rag sends directly against ogx.
 #
+# correction, 2026-10-10: the litemaas gateway behind vllm-inference now
+# reports itself as gpt-oss-120b instead of Qwen3.6-35B-A3B (see
+# manifests/spear-inference/01-ogxserver.yaml's own comment), updated
+# everywhere this project names its two generation models. gpt-oss-120b
+# is also a reasoning-style model family, so the same hidden chain of
+# thought truncation plausibly still applies, but that has not been
+# independently reconfirmed live against this specific model the way the
+# Qwen3.6-35B-A3B finding above was. verify live, not assumed, before
+# trusting autorag's judge scores: replay a real judge prompt against
+# ogx with this proxy in front of it and confirm finish_reason is no
+# longer length.
+#
 # also confirmed live: passing chat_template_kwargs={"enable_thinking":
 # false} in the request body suppresses the reasoning pass on both
 # models and they then return clean, valid json content well inside 256

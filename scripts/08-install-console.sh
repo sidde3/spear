@@ -105,20 +105,142 @@ ensure_sso_realm_demo_users() {
       continue
     fi
     existing="$(curl -sk -H "Authorization: Bearer ${admin_token}" \
-      "https://${kc_host}/admin/realms/sso/users?username=${username}&exact=true" \
+      "https://${kc_host}/admin/realms/${AGENTS_NS}/users?username=${username}&exact=true" \
       | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d[0]["id"] if d else "")' 2>/dev/null)"
     if [[ -n "${existing}" ]]; then
       log "sso realm already has ${username}, leaving the account alone, only syncing its password"
-      curl -sk -o /dev/null -X PUT "https://${kc_host}/admin/realms/sso/users/${existing}/reset-password" \
+      curl -sk -o /dev/null -X PUT "https://${kc_host}/admin/realms/${AGENTS_NS}/users/${existing}/reset-password" \
         -H "Authorization: Bearer ${admin_token}" -H "Content-Type: application/json" \
         -d "{\"type\":\"password\",\"value\":\"${password}\",\"temporary\":false}"
       continue
     fi
     log "creating ${username} in the sso realm"
-    curl -sk -o /dev/null -X POST "https://${kc_host}/admin/realms/sso/users" \
+    curl -sk -o /dev/null -X POST "https://${kc_host}/admin/realms/${AGENTS_NS}/users" \
       -H "Authorization: Bearer ${admin_token}" -H "Content-Type: application/json" \
       -d "{\"username\":\"${username}\",\"firstName\":\"${first}\",\"lastName\":\"${last}\",\"email\":\"${email}\",\"emailVerified\":true,\"enabled\":true,\"requiredActions\":[],\"credentials\":[{\"type\":\"password\",\"value\":\"${password}\",\"temporary\":false}]}"
   done
+}
+
+# wires openshift's own cluster login up to the same spear-shield-agents
+# keycloak realm the console/agents already use. confirmed missing
+# entirely on a fresh cluster: oauth cluster's own spec starts as {},
+# no identity providers at all, so the only way to log into this
+# cluster is kube:admin, there is no way to log in as either seeded
+# demo persona (balakrishnan.b, siddhartha.de) at all, which the console
+# backend's own persona mapping (server.py's ask_spear_shield,
+# persona_password) depends on to decide who is actually asking.
+# without this, the console's own "ask spear shield" chat page can
+# never work for a real browser user, only for kube:admin, who has no
+# persona file on disk and predictably fails with "no
+# spear-shield-agents realm password on file for 'kube:admin'".
+#
+# a new, dedicated keycloak client for this, not reusing spear-coordinator:
+# that client's own directAccessGrantsEnabled is for the backend's own
+# server side password grant, standardFlowEnabled false, the opposite
+# of what an interactive browser redirect login needs. see
+# manifests/spear-shield-agents/01-keycloak-realm.yaml's own matching
+# client entry, documentation only: KeycloakRealmImport is a one time
+# import job (see that file's header comment), an already imported
+# realm needs this client created via the admin api instead, same as
+# ensure_sso_realm_demo_users above already does for users.
+#
+# idempotent by checking for the openshift-config secret first, not the
+# keycloak client: a client with no matching secret recorded here would
+# leave oauth cluster patched with a clientSecret reference pointing at
+# nothing, the safer order is create-then-record, never the reverse.
+# keycloak's route tls, confirmed live, is a real letsencrypt cert on
+# this cluster's own wildcard ingress domain (reencrypt termination,
+# the backend-facing leg uses the service-ca issued cert instead, see
+# manifests/platform/04-keycloak-server.yaml), so oauth-openshift's own
+# default trust store already trusts the issuer url below with no
+# custom ca needed, confirmed live with a plain curl, no -k
+ensure_openshift_oauth_idp() {
+  local idp_name="spear-shield-agents" client_id="openshift-console"
+  local kc_host cluster_domain redirect_uri issuer
+  kc_host="$(oc get route keycloak -n keycloak -o jsonpath='{.spec.host}')"
+  cluster_domain="$(oc get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}')"
+  redirect_uri="https://oauth-openshift.${cluster_domain}/oauth2callback/${idp_name}"
+  issuer="https://${kc_host}/realms/${AGENTS_NS}"
+
+  if oc get secret keycloak-openshift-client-secret -n openshift-config >/dev/null 2>&1; then
+    log "openshift-console keycloak client secret already recorded, leaving the client alone"
+  else
+    local admin_user admin_pass admin_token
+    admin_user="$(oc get secret keycloak-initial-admin -n keycloak -o jsonpath='{.data.username}' | base64 -d)"
+    admin_pass="$(oc get secret keycloak-initial-admin -n keycloak -o jsonpath='{.data.password}' | base64 -d)"
+    # -sS --fail, not -sk: confirmed live this cluster's keycloak route
+    # presents a real, publicly trusted let's encrypt cert (see this
+    # function's own header comment), so verifying it costs nothing here
+    # and actually matters for this one, unlike the rest of this file's
+    # established -sk convention: these calls mint and carry a real
+    # keycloak admin token plus a client secret, --fail surfaces a real
+    # tls or http error on stderr instead of silently degrading into the
+    # same empty-token skip path a wrong password would also produce
+    admin_token="$(curl -sS --fail -X POST "https://${kc_host}/realms/master/protocol/openid-connect/token" \
+      -d 'grant_type=password' -d 'client_id=admin-cli' \
+      --data-urlencode "username=${admin_user}" --data-urlencode "password=${admin_pass}" \
+      | python3 -c 'import json,sys; print(json.load(sys.stdin).get("access_token",""))' 2>/dev/null)"
+    if [[ -z "${admin_token}" ]]; then
+      echo "warning: could not get a keycloak admin token, skipping openshift oauth idp setup" >&2
+      return 0
+    fi
+
+    local client_uuid
+    client_uuid="$(curl -sS --fail -H "Authorization: Bearer ${admin_token}" \
+      "https://${kc_host}/admin/realms/${AGENTS_NS}/clients?clientId=${client_id}" \
+      | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d[0]["id"] if d else "")' 2>/dev/null)"
+    if [[ -z "${client_uuid}" ]]; then
+      log "creating the ${client_id} client in the ${AGENTS_NS} realm, redirect ${redirect_uri}"
+      # -S, not --fail: a real creation failure should still fall through
+      # to the re-lookup and warn-and-skip below rather than aborting
+      # this whole install script via set -e, same soft-skip contract
+      # every other guard in this function already uses
+      curl -sS -o /dev/null -X POST "https://${kc_host}/admin/realms/${AGENTS_NS}/clients" \
+        -H "Authorization: Bearer ${admin_token}" -H "Content-Type: application/json" \
+        -d "{\"clientId\":\"${client_id}\",\"name\":\"OpenShift console login\",\"protocol\":\"openid-connect\",\"publicClient\":false,\"standardFlowEnabled\":true,\"directAccessGrantsEnabled\":false,\"serviceAccountsEnabled\":false,\"clientAuthenticatorType\":\"client-secret\",\"redirectUris\":[\"${redirect_uri}\"]}"
+      client_uuid="$(curl -sS --fail -H "Authorization: Bearer ${admin_token}" \
+        "https://${kc_host}/admin/realms/${AGENTS_NS}/clients?clientId=${client_id}" \
+        | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d[0]["id"] if d else "")' 2>/dev/null)"
+    fi
+    if [[ -z "${client_uuid}" ]]; then
+      echo "warning: could not create or find the ${client_id} keycloak client, skipping openshift oauth idp setup" >&2
+      return 0
+    fi
+
+    local client_secret
+    client_secret="$(curl -sS --fail -H "Authorization: Bearer ${admin_token}" \
+      "https://${kc_host}/admin/realms/${AGENTS_NS}/clients/${client_uuid}/client-secret" \
+      | python3 -c 'import json,sys; print(json.load(sys.stdin).get("value",""))' 2>/dev/null)"
+    if [[ -z "${client_secret}" ]]; then
+      echo "warning: could not read the ${client_id} client secret, skipping openshift oauth idp setup" >&2
+      return 0
+    fi
+
+    log "storing the ${client_id} client secret in openshift-config"
+    oc create secret generic keycloak-openshift-client-secret -n openshift-config \
+      --from-literal=clientSecret="${client_secret}"
+  fi
+
+  log "wiring ${idp_name} into oauth cluster as an openid identity provider, if not already present"
+  oc get oauth cluster -o json | python3 -c "
+import json, sys
+obj = json.load(sys.stdin)
+spec = obj.setdefault('spec', {})
+idps = spec.setdefault('identityProviders', [])
+if not any(p.get('name') == '${idp_name}' for p in idps):
+    idps.append({
+        'name': '${idp_name}',
+        'mappingMethod': 'claim',
+        'type': 'OpenID',
+        'openID': {
+            'clientID': '${client_id}',
+            'clientSecret': {'name': 'keycloak-openshift-client-secret'},
+            'claims': {'preferredUsername': ['preferred_username'], 'email': ['email'], 'name': ['name']},
+            'issuer': '${issuer}',
+        },
+    })
+json.dump(obj, sys.stdout)
+" | oc apply -f -
 }
 
 resolve_routes() {
@@ -192,6 +314,7 @@ main() {
   oc apply -f "${ROOT_DIR}/manifests/spear-console/02-chat-creds.yaml"
   oc apply -f "${ROOT_DIR}/manifests/spear-console/03-backend-node-reader.yaml"
   ensure_sso_realm_demo_users
+  ensure_openshift_oauth_idp
   oc apply -f "${ROOT_DIR}/manifests/spear-shield-agents/08-console-backend-rbac.yaml"
   oc apply -f "${ROOT_DIR}/manifests/spear-console/01-backend.yaml"
 
@@ -242,7 +365,7 @@ main() {
     "AUTORAG_OGX_SECRET_NAME=autorag-ogx-creds" \
     "AUTORAG_VECTOR_IO_PROVIDER_ID=pgvector" \
     "AUTORAG_EMBEDDING_MODELS=vllm-embedding/nomic-embed-text-v1.5" \
-    "AUTORAG_GENERATION_MODELS=vllm-inference/Qwen3.6-35B-A3B,openai/publishers/prelude-maas/models/glm-53-flash" \
+    "AUTORAG_GENERATION_MODELS=vllm-inference/gpt-oss-120b,openai/publishers/prelude-maas/models/glm-53-flash" \
     "AUTORAG_MAX_RAG_PATTERNS=8" \
     "AUTORAG_PRESET=balanced" \
     "AUTORAG_OPTIMIZATION_METRIC=faithfulness" \

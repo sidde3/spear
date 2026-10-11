@@ -54,7 +54,7 @@ OpenShell gateway is ready.
 route: http://${route_host}
 
 next step:
-  ./scripts/31-deploy-openshell-agents.sh
+  ./scripts/00-install-spear.sh
 
 EOF
 }

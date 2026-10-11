@@ -20,8 +20,8 @@
   "devDependencies": {
     "@babel/core": "^7.29.0",
     "@babel/preset-env": "^7.29.0",
-    "@openshift-console/dynamic-plugin-sdk": "4.21-latest",
-    "@openshift-console/dynamic-plugin-sdk-webpack": "4.21-latest",
+    "@openshift-console/dynamic-plugin-sdk": "4.20-latest",
+    "@openshift-console/dynamic-plugin-sdk-webpack": "4.20-latest",
     "@patternfly/react-charts": "^8.6.1",
     "@patternfly/react-core": "^6.2.2",
     "@patternfly/react-icons": "^6.2.2",
@@ -92,7 +92,7 @@
       "TrendPage": "./components/TrendPage"
     },
     "dependencies": {
-      "@console/pluginAPI": "^4.21.0"
+      "@console/pluginAPI": "^4.20.0"
     }
   },
   "packageManager": "yarn@4.13.0"

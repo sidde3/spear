@@ -5,7 +5,7 @@ set -euo pipefail
 # platform itself (operator, dsc, dsci, dashboard config), plus authorino,
 # rhcl (kuadrant), ossm3/istio, mcp-gateway operator, and the keycloak
 # operator plus a real keycloak server instance. run this once per cluster
-# before deploy-agent-pack.sh. every step here is safe to re-run,
+# before 00-b-install-openshell.sh. every step here is safe to re-run,
 # subscriptions and crs are check first or plain idempotent apply, the
 # keycloak db password is only ever generated once and never touched again
 # on a rerun. the rhoai dsc/dsci/dashboard config are the one exception,
@@ -466,7 +466,7 @@ main() {
 
 keycloak: https://${KEYCLOAK_HOSTNAME}/
 next step:
-  ./scripts/deploy-agent-pack.sh
+  ./scripts/00-b-install-openshell.sh
 EOF
 }
 

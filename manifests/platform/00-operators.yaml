@@ -115,7 +115,7 @@ spec:
   source: redhat-operators
   sourceNamespace: openshift-marketplace
   installPlanApproval: Manual
-  startingCSV: servicemeshoperator3.v3.4.2
+  startingCSV: servicemeshoperator3.v3.4.3
 ---
 apiVersion: operators.coreos.com/v1alpha1
 kind: Subscription

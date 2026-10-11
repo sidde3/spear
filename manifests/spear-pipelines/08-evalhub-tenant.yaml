@@ -22,6 +22,21 @@ metadata:
 # tenant (manifests/spear-shield-eval/02-caller-rbac.yaml), granted here
 # too so one token can submit jobs against either tenant namespace by
 # switching the x-tenant header.
+#
+# correction, 2026-10-11: this role briefly got deleted from here under
+# the mistaken belief that the kube-rbac-proxy sidecar fronting evalhub's
+# own api server checks these trustyai.opendatahub.io virtual resources
+# cluster scoped rather than namespaced, and that a single
+# ClusterRoleBinding in the other file's own 02-caller-rbac.yaml already
+# covered every tenant this sa calls with. wrong on both counts, see that
+# file's own corrected comment: the proxy's real auth.yaml, read directly
+# out of the running sidecar, namespace scopes every one of these checks
+# to the x-tenant header's own value, always, a ClusterRoleBinding here
+# would have let this one sa's token pass that check for literally any
+# namespace on the cluster, not just this project's own two tenants,
+# defeating the isolation the header exists to enforce, caught in review
+# before it shipped. restored as a namespaced Role/RoleBinding, the only
+# shape that was ever actually correct
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -29,7 +44,7 @@ metadata:
   namespace: spear-pipelines
 rules:
   - apiGroups: ["trustyai.opendatahub.io"]
-    resources: ["evaluations", "collections", "providers"]
+    resources: ["evaluations", "collections", "providers", "experiments"]
     verbs: ["get", "list", "create", "update", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1

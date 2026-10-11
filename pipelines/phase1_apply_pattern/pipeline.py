@@ -181,26 +181,51 @@ def apply_winning_pattern(
     # sql runs against it. rag_reader is created by
     # scripts/03-install-data.sh, not here, a grant against a role that
     # does not exist yet should never be what blocks a real indexing run
+    #
+    # correction, 2026-10-11: this used to be one cur.execute() of a
+    # dollar-quoted DO $$ ... $$ block doing the role check in plpgsql.
+    # confirmed live, this project's first ever real apply-pattern run:
+    # psycopg2.errors.SyntaxError: syntax error at or near "$", the
+    # submitted sql's own DO $$ had lost one of its two $ characters by
+    # the time postgres saw it. not a bug in this file: both the locally
+    # compiled phase1-apply-pattern-pipeline.yaml and the exact version
+    # string stored on rag-phase1-dspa's own pipeline server (fetched
+    # live via the v2beta1 api and diffed byte for byte) still had the
+    # correct DO $$, intact, so whatever mangles it happens inside
+    # rhoai's own kfp v2 launcher when it reconstructs the component's
+    # python source inside the pod at runtime, not anything compiled or
+    # stored here, and not something this repo can inspect or patch, it
+    # ships inside the vendored operator image. the real fix is this:
+    # the role check moved into python, so no dollar-quoted plpgsql
+    # block is ever sent at all, sidestepping whatever that launcher bug
+    # is rather than chasing it
+    cur.execute("SELECT 1 FROM pg_roles WHERE rolname = 'rag_reader'")
+    if cur.fetchone():
+        cur.execute("GRANT SELECT ON rag_chunks TO rag_reader")
+
     cur.execute(
         """
-        DO $$
-        BEGIN
-            IF EXISTS (SELECT FROM pg_roles WHERE rolname = 'rag_reader') THEN
-                GRANT SELECT ON rag_chunks TO rag_reader;
-            END IF;
-        END
-        $$;
-
         ALTER TABLE rag_chunks ENABLE ROW LEVEL SECURITY;
         ALTER TABLE rag_chunks FORCE ROW LEVEL SECURITY;
 
         DROP POLICY IF EXISTS rag_chunks_abac ON rag_chunks;
+        -- every claim-derived value is NULLIF'd to '', not just team: an
+        -- unrecognized caller_clearance makes allowed_clearance_levels()
+        -- return [] (rag_query.py), and a missing caller_dept is coerced
+        -- to "" (caller_dept or ""), so without this normalization both
+        -- current_setting() calls would come back as the literal empty
+        -- string rather than NULL, and would then match any row whose
+        -- own clearance_level/dept column was also stored as "" rather
+        -- than NULL, fail-open for exactly the "forgot a claim" case
+        -- this second, independent layer exists to survive. NULLIF makes
+        -- an absent claim compare against NULL instead, which is never
+        -- true, so the row is denied rather than matched.
         CREATE POLICY rag_chunks_abac ON rag_chunks
             FOR SELECT
             USING (
-                clearance_level = ANY(string_to_array(current_setting('app.allowed_levels', true), ','))
+                clearance_level = ANY(string_to_array(NULLIF(current_setting('app.allowed_levels', true), ''), ','))
                 AND (
-                    dept = current_setting('app.dept', true)
+                    dept = NULLIF(current_setting('app.dept', true), '')
                     OR team = NULLIF(current_setting('app.team', true), '')
                     OR project_scope = 'enterprise-wide'
                 )

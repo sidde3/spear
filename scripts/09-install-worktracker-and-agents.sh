@@ -597,6 +597,11 @@ deploy_sandboxed_agents() {
   oc start-build spear-retrieval-agent --from-dir="${ROOT_DIR}/agents" --wait -n "${AGENTS_NS}"
 
   log "rag-query-relay, same image as spear-retrieval-agent, now that it actually exists"
+  # openshift's internal registry refuses any cross namespace image pull
+  # without an explicit grant, this deployment lives in spear-data but
+  # pulls an image built in spear-shield-agents, see that rbac manifest's
+  # own header comment for the live ErrImagePull this fixes
+  oc apply -f "${ROOT_DIR}/manifests/spear-shield-agents/09-rag-query-relay-image-puller-rbac.yaml"
   oc apply -f "${ROOT_DIR}/manifests/spear-data/02-rag-query-relay.yaml"
   wait_deploy_ready spear-shield-rag-query-relay "${DATA_NS}"
 

@@ -95,7 +95,7 @@ AUTORAG_EMBEDDING_MODELS = _env_list(
 )
 AUTORAG_GENERATION_MODELS = _env_list(
     "AUTORAG_GENERATION_MODELS",
-    "vllm-inference/Qwen3.6-35B-A3B,openai/publishers/prelude-maas/models/glm-53-flash",
+    "vllm-inference/gpt-oss-120b,openai/publishers/prelude-maas/models/glm-53-flash",
 )
 AUTORAG_MAX_RAG_PATTERNS = int(os.environ.get("AUTORAG_MAX_RAG_PATTERNS", "8"))
 AUTORAG_PRESET = os.environ.get("AUTORAG_PRESET", "balanced")

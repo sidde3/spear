@@ -5,6 +5,7 @@
 # at the repo root, tracked despite the blanket *.md rule above
 !seed-data/raw-intake/*.md
 !scripts/PLATFORM_SETUP.md
+!README.md
 *.html
 *.rtf
 *.pptx

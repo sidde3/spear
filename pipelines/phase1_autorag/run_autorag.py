@@ -80,7 +80,7 @@ VECTOR_IO_PROVIDER_ID = "pgvector"
 # live for one real run where all 8 real objective function evaluations
 # logged foundation_model=glm-53-flash, qwen3.6-35b-a3b never sampled.
 GENERATION_MODELS = [
-    "vllm-inference/Qwen3.6-35B-A3B",
+    "vllm-inference/gpt-oss-120b",
     "openai/publishers/prelude-maas/models/glm-53-flash",
 ]
 # only 1 embedding model, not the section 5 spec's 2: confirmed by

@@ -88,6 +88,18 @@ main() {
   require_secret ogx-litemaas-key
   require_secret ogx-embedding-key
 
+  # phase1_ingestion/pipeline.py's own generate_eval_dataset task
+  # (_use_ogx_creds, running as a pod in spear-pipelines) reads
+  # ogx-glm-key via a secretKeyRef, which only ever resolves within the
+  # pod's own namespace, same cross namespace gap 04-install-pipelines.sh
+  # already mirrors pgvector-creds for. mirrored here instead of there
+  # since this secret does not exist until this script runs, which comes
+  # after 04-install-pipelines.sh in the documented install order.
+  # confirmed live via a real ingestion run's generate-eval-dataset pod
+  # stuck in CreateContainerConfigError, "secret ogx-glm-key not found".
+  log "mirroring ogx-glm-key into ${PIPELINES_NS}, phase1-ingestion-pipeline's generate-eval-dataset task needs its own local copy"
+  mirror_secret ogx-glm-key "${INFERENCE_NS}" "${PIPELINES_NS}"
+
   log "applying the dashboard flags patch and the self hosted embedding server (02-embed-server.yaml), the ogxserver cr below needs it up first"
   oc apply -f "${ROOT_DIR}/manifests/spear-inference/02-embed-server.yaml"
   oc rollout status deployment/rag-phase1-embed-server -n "${INFERENCE_NS}" --timeout=300s

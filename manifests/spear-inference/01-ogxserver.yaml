@@ -67,7 +67,12 @@
 #   remote::openai        -> maas gateway, glm-53-flash (body based
 #     routing, not the old per model path, see PHASE1_PLAN.md)
 #   remote::vllm inference -> litemaas gateway, reports itself as
-#     Qwen3.6-35B-A3B under /v1/models
+#     Qwen3.6-35B-A3B under /v1/models. correction, 2026-10-10: the same
+#     gateway, same ogx-litemaas-key, now reports itself as gpt-oss-120b
+#     instead, confirmed live against ogx's own /v1/models, an upstream
+#     change on litemaas's own side, nothing in this cr changed. every
+#     other model slot was unaffected. see pipelines/phase1_autorag/
+#     run_autorag.py's own GENERATION_MODELS, now updated to match
 #   remote::vllm embedding -> a self hosted text-embeddings-inference
 #     (TEI) server inside this namespace (manifests/spear-inference/02-embed-server.yaml),
 #     serving nomic-embed-text-v1.5 natively at 768 dims with a genuine

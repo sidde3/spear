@@ -9,6 +9,56 @@
 # evalhub-evaluator role, trustyai.opendatahub.io virtual resources, not
 # real crds, enforced by evalhub's own subjectaccessreview checks keyed
 # off the x-tenant header.
+#
+# correction, 2026-10-11: that set was incomplete, confirmed live
+# submitting a real ragas job against this project's first ever evalhub
+# instance: 403 "Forbidden
+# (user=system:serviceaccount:spear-shield-eval:spear-shield-eval-caller,
+# verb=create, resource=experiments, subresource=)". two real things
+# were wrong, found by reading ground truth, not guessing, but the first
+# fix attempt below was itself wrong and is recorded here so it is not
+# repeated:
+#
+# evalhub's own api server only listens on 127.0.0.1, confirmed from its
+# own startup log, the externally reachable side is a kube-rbac-proxy
+# sidecar in front of it (that literal "Forbidden (user=..., verb=...,
+# resource=..., subresource=)" text is the proxy's own canned denial
+# format, not evalhub's own go code). a raw SubjectAccessReview with no
+# namespace at all came back "allowed":false against this project's own
+# namespaced Role, which looked like proof the proxy's own check was
+# cluster scoped, not namespaced, so this file briefly switched to a
+# ClusterRole bound by a ClusterRoleBinding. wrong: reading
+# /etc/kube-rbac-proxy/auth.yaml directly out of the running sidecar
+# afterward (chasing a second, still unresolved 403) showed every single
+# trustyai.opendatahub.io mapping in it uses `namespace:
+# "{{.FromHeader}}"`, the proxy never performs a namespace-less check at
+# all, the earlier no-namespace sar test was never representative of
+# anything the proxy actually does. the namespaced Role already
+# satisfied the real, namespaced check from the start, confirmed by the
+# very first namespaced sar test run, before any of this. a
+# ClusterRoleBinding here would have let this one service account's
+# token pass the X-Tenant scoped sar for literally any namespace on the
+# cluster, not just this project's own two tenants, defeating the
+# isolation that header exists to enforce, caught in review before this
+# ever shipped. reverted to a namespaced Role/RoleBinding below, same as
+# it always should have been.
+#
+# the real, second, still-standing fix: POST /api/v1/evaluations/jobs
+# actually requires three separate resourceAttributes checks to all
+# pass, not one: trustyai.opendatahub.io/evaluations create (namespaced
+# to the X-Tenant header's value, satisfied by the Role below), PLUS
+# mlflow.kubeflow.org/experiments create, PLUS
+# mlflow.kubeflow.org/experiments get, both also namespaced to X-Tenant,
+# a different apiGroup with no relation to trustyai.opendatahub.io at
+# all. "resource=experiments" in the denial text was always this one,
+# never a trustyai.opendatahub.io virtual resource, confirmed by the
+# real auth.yaml having no trustyai.opendatahub.io/experiments mapping
+# anywhere in it at all. manifests/spear-pipelines/08-evalhub-tenant.yaml
+# already grants mlflow.kubeflow.org/experiments correctly, but only in
+# spear-pipelines, for the ibm-clear job's own X-Tenant. ragas, garak and
+# spear-confidential-data all submit with X-Tenant: spear-shield-eval
+# instead (scripts/11-submit-evalhub-jobs.sh), which had no matching
+# grant anywhere, added below
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -22,7 +72,7 @@ metadata:
   namespace: spear-shield-eval
 rules:
   - apiGroups: ["trustyai.opendatahub.io"]
-    resources: ["evaluations", "collections", "providers"]
+    resources: ["evaluations", "collections", "providers", "experiments"]
     verbs: ["get", "list", "create", "update", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -37,4 +87,42 @@ subjects:
 roleRef:
   kind: Role
   name: evalhub-evaluator
+  apiGroup: rbac.authorization.k8s.io
+---
+# the real, second blocker, see the correction above: the kube-rbac-proxy
+# sidecar's own auth.yaml also requires mlflow.kubeflow.org/experiments
+# create+get, namespaced to whatever X-Tenant the caller sent, for every
+# job submission, not just the trustyai.opendatahub.io checks above.
+# same shape manifests/spear-pipelines/08-evalhub-tenant.yaml's own
+# spear-pipelines-mlflow-evalhub-caller role already uses correctly for
+# the ibm-clear job's own X-Tenant: spear-pipelines, this is the matching
+# grant for the three jobs (ragas, garak, spear-confidential-data) that
+# submit with X-Tenant: spear-shield-eval instead. evalhub-service
+# granted here too, same reasoning as that file's own binding: evalhub's
+# own backend, not just this caller, talks to mlflow on the job's behalf
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: spear-shield-eval-mlflow-evalhub-caller
+  namespace: spear-shield-eval
+rules:
+  - apiGroups: [mlflow.kubeflow.org]
+    resources: [experiments]
+    verbs: [get, list, create, update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: spear-shield-eval-mlflow-evalhub-caller
+  namespace: spear-shield-eval
+subjects:
+  - kind: ServiceAccount
+    name: evalhub-service
+    namespace: spear-shield-eval
+  - kind: ServiceAccount
+    name: spear-shield-eval-caller
+    namespace: spear-shield-eval
+roleRef:
+  kind: Role
+  name: spear-shield-eval-mlflow-evalhub-caller
   apiGroup: rbac.authorization.k8s.io

@@ -211,6 +211,46 @@ spec:
         publicClient: false
         serviceAccountsEnabled: false
         protocol: openid-connect
+      # dedicated to openshift cluster login itself, confirmed missing
+      # entirely on a fresh cluster: oauth cluster's own spec starts as
+      # {}, no identity providers at all, so there is no way to log into
+      # the openshift web console as balakrishnan.b or siddhartha.de,
+      # only kube:admin, which the console backend's own persona mapping
+      # (server.py's persona_password) has no file for and predictably
+      # fails on. not reusing spear-coordinator for this: that client's
+      # directAccessGrantsEnabled is for the backend's own server side
+      # password grant per real human user, standardFlowEnabled false,
+      # the opposite of what an interactive browser redirect login
+      # needs. this entry documents the client for a fresh install;
+      # since KeycloakRealmImport only ever runs once (see this file's
+      # own header comment), an already imported realm needs this client
+      # created via the admin api instead, see
+      # scripts/08-install-console.sh's own ensure_openshift_oauth_idp,
+      # which also patches oauth cluster itself, not reproducible here,
+      # a KeycloakRealmImport has no way to touch a cluster scoped
+      # config.openshift.io object
+      - clientId: openshift-console
+        name: OpenShift console login
+        enabled: true
+        protocol: openid-connect
+        publicClient: false
+        standardFlowEnabled: true
+        directAccessGrantsEnabled: false
+        serviceAccountsEnabled: false
+        clientAuthenticatorType: client-secret
+        # illustrative only, keycloak's own redirect uri matching has no
+        # real glob for a variable hostname segment like this, a literal
+        # fresh install needs the real cluster domain substituted here
+        # (oc get ingresses.config.openshift.io cluster, same lookup
+        # ensure_openshift_oauth_idp itself does) before this would ever
+        # actually match a real callback, which is exactly why the live
+        # fix goes through the admin api with the real domain resolved,
+        # not through re-applying this file
+        redirectUris:
+          # ingresses.config.openshift.io cluster's own .spec.domain
+          # already includes the apps. prefix, confirmed live
+          # ("apps.cluster-....com"), no second apps. here
+          - "https://oauth-openshift.CLUSTER_DOMAIN_PLACEHOLDER/oauth2callback/spear-shield-agents"
     users:
       - username: balakrishnan.b
         firstName: Balakrishnan

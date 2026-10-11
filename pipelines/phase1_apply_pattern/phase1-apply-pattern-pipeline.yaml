@@ -191,34 +191,82 @@ deploymentSpec:
           , \"TEXT\"), (\"autorag_run_id\", \"TEXT\"),\n        (\"chunk_size\", \"\
           INT\"), (\"chunk_overlap\", \"INT\"),\n    ):\n        cur.execute(f\"ALTER\
           \ TABLE rag_chunks ADD COLUMN IF NOT EXISTS {column} {coltype}\")\n\n  \
-          \  def embed_chunks(texts: list[str]) -> list[list[float]]:\n        resp\
-          \ = requests.post(\n            f\"{ogx_base_url}/v1/embeddings\",\n   \
-          \         json={\"model\": embedding_model, \"input\": texts},\n       \
-          \     timeout=120,\n        )\n        resp.raise_for_status()\n       \
-          \ data = resp.json()[\"data\"]\n        return [row[\"embedding\"] for row\
-          \ in sorted(data, key=lambda r: r[\"index\"])]\n\n    def embed_chunks_with_retry(texts:\
-          \ list[str], attempts: int = 3) -> list[list[float]]:\n        # a null\
-          \ embedding row can never be found by any vector search\n        # again,\
-          \ ever, regardless of who is asking, so a transient blip\n        # is worth\
-          \ a couple retries rather than writing a dead row into a\n        # live\
-          \ rag index. this is the real fix for the doc-001/doc-002\n        # null\
-          \ embedding incident, found and repaired live on 2026-10-02:\n        #\
-          \ both rows turned out to predate this pipeline entirely, from an\n    \
-          \    # older ingestion path with the same swallow-and-null behavior,\n \
-          \       # never caught because nothing downstream ever read the old\n  \
-          \      # embedding_failures counter\n        last_exc = None\n        for\
-          \ attempt in range(attempts):\n            try:\n                return\
-          \ embed_chunks(texts)\n            except requests.RequestException as exc:\n\
-          \                last_exc = exc\n                if attempt < attempts -\
-          \ 1:\n                    time.sleep(2 ** attempt)\n        raise last_exc\n\
-          \n    total_chunks = 0\n    documents_indexed = 0\n    # per doc_id, not\
-          \ just a count: a bare number nobody downstream reads\n    # is not a real\
-          \ safety net, this list is what actually ends up in\n    # apply_report.json\
-          \ and is small enough to always include in full\n    embedding_failures\
-          \ = []\n    for row in sanitized_rows:\n        doc = docs_by_id.get(row[\"\
-          doc_id\"])\n        if doc is None:\n            print(f\"  {row['doc_id']}:\
-          \ no abac tags found in ingestion report, skipping\")\n            continue\n\
-          \        content = s3.get_object(\n            Bucket=bucket, Key=f\"{sanitized_prefix}{row['filename']}\"\
+          \  # row level security, same table this function already owns the\n   \
+          \ # schema of. the real abac decision used to live only in\n    # rag_query.py's\
+          \ own WHERE clause, one layer, a bug there or a future\n    # code path\
+          \ that forgets to call it would have seen every row. this\n    # is the\
+          \ second, independent layer: rag_reader (the only role\n    # rag-query-relay\
+          \ ever connects as) has no bypassrls, so a row only\n    # ever comes back\
+          \ if this policy itself says so, regardless of what\n    # sql runs against\
+          \ it. rag_reader is created by\n    # scripts/03-install-data.sh, not here,\
+          \ a grant against a role that\n    # does not exist yet should never be\
+          \ what blocks a real indexing run\n    #\n    # correction, 2026-10-11:\
+          \ this used to be one cur.execute() of a\n    # dollar-quoted DO $$ ...\
+          \ $$ block doing the role check in plpgsql.\n    # confirmed live, this\
+          \ project's first ever real apply-pattern run:\n    # psycopg2.errors.SyntaxError:\
+          \ syntax error at or near \"$\", the\n    # submitted sql's own DO $$ had\
+          \ lost one of its two $ characters by\n    # the time postgres saw it. not\
+          \ a bug in this file: both the locally\n    # compiled phase1-apply-pattern-pipeline.yaml\
+          \ and the exact version\n    # string stored on rag-phase1-dspa's own pipeline\
+          \ server (fetched\n    # live via the v2beta1 api and diffed byte for byte)\
+          \ still had the\n    # correct DO $$, intact, so whatever mangles it happens\
+          \ inside\n    # rhoai's own kfp v2 launcher when it reconstructs the component's\n\
+          \    # python source inside the pod at runtime, not anything compiled or\n\
+          \    # stored here, and not something this repo can inspect or patch, it\n\
+          \    # ships inside the vendored operator image. the real fix is this:\n\
+          \    # the role check moved into python, so no dollar-quoted plpgsql\n \
+          \   # block is ever sent at all, sidestepping whatever that launcher bug\n\
+          \    # is rather than chasing it\n    cur.execute(\"SELECT 1 FROM pg_roles\
+          \ WHERE rolname = 'rag_reader'\")\n    if cur.fetchone():\n        cur.execute(\"\
+          GRANT SELECT ON rag_chunks TO rag_reader\")\n\n    cur.execute(\n      \
+          \  \"\"\"\n        ALTER TABLE rag_chunks ENABLE ROW LEVEL SECURITY;\n \
+          \       ALTER TABLE rag_chunks FORCE ROW LEVEL SECURITY;\n\n        DROP\
+          \ POLICY IF EXISTS rag_chunks_abac ON rag_chunks;\n        -- every claim-derived\
+          \ value is NULLIF'd to '', not just team: an\n        -- unrecognized caller_clearance\
+          \ makes allowed_clearance_levels()\n        -- return [] (rag_query.py),\
+          \ and a missing caller_dept is coerced\n        -- to \"\" (caller_dept\
+          \ or \"\"), so without this normalization both\n        -- current_setting()\
+          \ calls would come back as the literal empty\n        -- string rather than\
+          \ NULL, and would then match any row whose\n        -- own clearance_level/dept\
+          \ column was also stored as \"\" rather\n        -- than NULL, fail-open\
+          \ for exactly the \"forgot a claim\" case\n        -- this second, independent\
+          \ layer exists to survive. NULLIF makes\n        -- an absent claim compare\
+          \ against NULL instead, which is never\n        -- true, so the row is denied\
+          \ rather than matched.\n        CREATE POLICY rag_chunks_abac ON rag_chunks\n\
+          \            FOR SELECT\n            USING (\n                clearance_level\
+          \ = ANY(string_to_array(NULLIF(current_setting('app.allowed_levels', true),\
+          \ ''), ','))\n                AND (\n                    dept = NULLIF(current_setting('app.dept',\
+          \ true), '')\n                    OR team = NULLIF(current_setting('app.team',\
+          \ true), '')\n                    OR project_scope = 'enterprise-wide'\n\
+          \                )\n            )\n        \"\"\"\n    )\n\n    def embed_chunks(texts:\
+          \ list[str]) -> list[list[float]]:\n        resp = requests.post(\n    \
+          \        f\"{ogx_base_url}/v1/embeddings\",\n            json={\"model\"\
+          : embedding_model, \"input\": texts},\n            timeout=120,\n      \
+          \  )\n        resp.raise_for_status()\n        data = resp.json()[\"data\"\
+          ]\n        return [row[\"embedding\"] for row in sorted(data, key=lambda\
+          \ r: r[\"index\"])]\n\n    def embed_chunks_with_retry(texts: list[str],\
+          \ attempts: int = 3) -> list[list[float]]:\n        # a null embedding row\
+          \ can never be found by any vector search\n        # again, ever, regardless\
+          \ of who is asking, so a transient blip\n        # is worth a couple retries\
+          \ rather than writing a dead row into a\n        # live rag index. this\
+          \ is the real fix for the doc-001/doc-002\n        # null embedding incident,\
+          \ found and repaired live on 2026-10-02:\n        # both rows turned out\
+          \ to predate this pipeline entirely, from an\n        # older ingestion\
+          \ path with the same swallow-and-null behavior,\n        # never caught\
+          \ because nothing downstream ever read the old\n        # embedding_failures\
+          \ counter\n        last_exc = None\n        for attempt in range(attempts):\n\
+          \            try:\n                return embed_chunks(texts)\n        \
+          \    except requests.RequestException as exc:\n                last_exc\
+          \ = exc\n                if attempt < attempts - 1:\n                  \
+          \  time.sleep(2 ** attempt)\n        raise last_exc\n\n    total_chunks\
+          \ = 0\n    documents_indexed = 0\n    # per doc_id, not just a count: a\
+          \ bare number nobody downstream reads\n    # is not a real safety net, this\
+          \ list is what actually ends up in\n    # apply_report.json and is small\
+          \ enough to always include in full\n    embedding_failures = []\n    for\
+          \ row in sanitized_rows:\n        doc = docs_by_id.get(row[\"doc_id\"])\n\
+          \        if doc is None:\n            print(f\"  {row['doc_id']}: no abac\
+          \ tags found in ingestion report, skipping\")\n            continue\n  \
+          \      content = s3.get_object(\n            Bucket=bucket, Key=f\"{sanitized_prefix}{row['filename']}\"\
           \n        )[\"Body\"].read().decode(\"utf-8\")\n\n        chunks = []\n\
           \        start = 0\n        while start < len(content):\n            chunks.append(content[start:start\
           \ + chunk_size])\n            start += chunk_size - chunk_overlap\n\n  \

@@ -100,6 +100,36 @@ EOF
   oc wait --for=condition=Complete job/evalhub-bucket-bootstrap -n "${STORAGE_NS}" --timeout=120s
 }
 
+# builds spear-confidential-data-provider from evalhub/ and registers its
+# own provider configmap with the digest actually just pushed, not the
+# stale one 05-confidential-data-provider-config.yaml's own yaml hardcodes.
+# confirmed live, this project's first real attempt to stand up evalhub:
+# neither 04-confidential-data-provider-build.yaml nor
+# 05-confidential-data-provider-config.yaml was ever applied by this
+# script at all, despite both existing and 01-evalhub.yaml's own cr
+# already listing spear-confidential-data as one of its four providers,
+# so the operator's own reconcile failed outright: "Failed to reconcile
+# Provider ConfigMaps: provider \"spear-confidential-data\" not found".
+# even applying 05 as committed would not have been enough on its own,
+# its pinned image digest is from whatever cluster it was last built on,
+# not this one, see that file's own comment on why it is pinned rather
+# than :latest, bumping it by hand here the same way
+# 08-install-console.sh's own image_digest_ref already does for the
+# console images, not something a human has to remember to do manually
+ensure_confidential_data_provider() {
+  oc apply -f "${ROOT_DIR}/manifests/spear-shield-eval/04-confidential-data-provider-build.yaml"
+  log "building spear-confidential-data-provider from evalhub/"
+  oc start-build spear-confidential-data-provider --from-dir="${ROOT_DIR}/evalhub" --wait -n "${EVAL_NS}"
+
+  local repo digest image
+  repo="$(oc get is spear-confidential-data-provider -n "${EVAL_NS}" -o jsonpath='{.status.dockerImageRepository}')"
+  digest="$(oc get is spear-confidential-data-provider -n "${EVAL_NS}" -o jsonpath='{.status.tags[0].items[0].image}')"
+  image="${repo}@${digest}"
+  log "registering spear-confidential-data provider configmap, image ${image}"
+  sed -E "s|image: image-registry\.openshift-image-registry\.svc:5000/spear-shield-eval/spear-confidential-data-provider@sha256:[0-9a-f]+|image: ${image}|" \
+    "${ROOT_DIR}/manifests/spear-shield-eval/05-confidential-data-provider-config.yaml" | oc apply -f -
+}
+
 main() {
   command -v oc >/dev/null 2>&1 || { echo "oc is required" >&2; exit 1; }
   command -v openssl >/dev/null 2>&1 || { echo "openssl is required" >&2; exit 1; }
@@ -129,8 +159,21 @@ main() {
   log "custom provider configmaps: ragas-v062, ibm-clear-v060, on the operator's own newer quay.io tags"
   oc apply -f "${ROOT_DIR}/manifests/spear-shield-eval/03-custom-providers.yaml"
 
-  log "the real evalhub cr, providers: ragas-v062, ibm-clear-v060, garak"
+  log "spear-confidential-data provider: build + register, our own, not a community override"
+  ensure_confidential_data_provider
+
+  log "the real evalhub cr, providers: ragas-v062, ibm-clear-v060, garak, spear-confidential-data"
   oc apply -f "${ROOT_DIR}/manifests/spear-shield-eval/01-evalhub.yaml"
+  # oc wait fails immediately, not by polling, if the resource does not
+  # exist yet at all, confirmed live: this cr's own operator needs a
+  # moment to reconcile a brand new cr into its first real deployment,
+  # "Error from server (NotFound): deployments.apps evalhub not found"
+  # on a plain run straight after the apply above, wait for the object
+  # to exist first, then for it to actually report available
+  for _ in $(seq 1 30); do
+    oc get deployment/evalhub -n "${EVAL_NS}" >/dev/null 2>&1 && break
+    sleep 5
+  done
   oc wait --for=condition=Available deployment/evalhub -n "${EVAL_NS}" --timeout=300s
 
   log "caller serviceaccount + rbac for submitting jobs"

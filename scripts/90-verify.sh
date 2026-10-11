@@ -107,10 +107,22 @@ main() {
   # with a SearchSpaceValueError regardless of whether it would have
   # routed a real completion correctly. check exactly the models
   # run_autorag.py configures, not a stand in.
+  #
+  # correction, 2026-10-10: this used to check for
+  # vllm-inference/Qwen3.6-35B-A3B, see manifests/spear-inference/01-ogxserver.yaml's
+  # own comment on the remote::vllm slot. confirmed live this date: the
+  # litemaas gateway behind that same VLLM_URL/ogx-litemaas-key now
+  # reports itself as gpt-oss-120b instead, an upstream change on
+  # litemaas's own side, nothing in this repo's config changed. every
+  # other model (embedding, glm-53-flash) was unaffected. updated here,
+  # run_autorag.py's own GENERATION_MODELS, and
+  # scripts/08-install-console.sh's AUTORAG_GENERATION_MODELS together to
+  # adopt gpt-oss-120b as the second autorag generation model, not just
+  # patch this check to stop failing
   check "ogx registers both autorag generation models" oc run ogx-models-registered-verify-probe --rm -i \
     --restart=Never --image=registry.access.redhat.com/ubi9/ubi-minimal:latest -n "${INFERENCE_NS}" --command -- \
     bash -c "out=\$(curl -sf http://rag-phase1-ogx-service.${INFERENCE_NS}.svc.cluster.local:8321/v1/models); \
-      echo \"\${out}\" | grep -q 'vllm-inference/Qwen3.6-35B-A3B' && \
+      echo \"\${out}\" | grep -q 'vllm-inference/gpt-oss-120b' && \
       echo \"\${out}\" | grep -q 'openai/publishers/prelude-maas/models/glm-53-flash'"
   # glm-53-flash genuinely does still route a real completion, confirmed
   # both on 2026-09-27 and again while diagnosing the failure above. it is
